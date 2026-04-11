@@ -24,6 +24,7 @@ import appeng.api.util.DimensionalCoord;
 import appeng.api.util.IConfigManager;
 import appeng.helpers.DualityInterface;
 import appeng.helpers.IInterfaceHost;
+import appeng.me.GridAccessException;
 import appeng.me.helpers.MachineSource;
 import appeng.tile.grid.AENetworkInvTile;
 import appeng.tile.inventory.AppEngInternalInventory;
@@ -65,6 +66,8 @@ public class TileEntityAEChisel extends AENetworkInvTile implements IInterfaceHo
         super.onReady();
         this.getProxy().setIdlePowerUsage(10);
         this.getProxy().setValidSides(sides);
+        this.rebuildPatterns();
+        this.wakeForCachedOutputs();
     }
 
     @MENetworkEventSubscribe
@@ -86,36 +89,7 @@ public class TileEntityAEChisel extends AENetworkInvTile implements IInterfaceHo
     @Override
     public void onChangeInventory(IItemHandler inv, int slot, InvOperation invOperation, ItemStack removed, ItemStack added) {
         switch (invOperation) {
-            case EXTRACT -> {
-                if (!removed.isEmpty()) {
-                    patterns.clear();
-                    this.getProxy().getNode().getGrid().postEvent(new MENetworkCraftingPatternChange(this, this.getProxy().getNode()));
-                }
-            }
-            case INSERT -> {
-                var r = CarvingUtils.getChiselRegistry();
-                if (r != null) {
-                    var input = AEItemStack.fromItemStack(added);
-                    if (ChiselPatternDetails.addChiselPatterns(input, r.getItemsForChiseling(added), patterns, this.parallel)) {
-                        var n = this.getProxy().getNode();
-                        if (n == null) return;
-                        n.getGrid().postEvent(new MENetworkCraftingPatternChange(this,n));
-                    } else {
-                        this.inv.setStackInSlot(0, ItemStack.EMPTY);
-                    }
-                }
-            }
-            case SET -> {
-                patterns.clear();
-                var r = CarvingUtils.getChiselRegistry();
-                if (r != null) {
-                    var input = AEItemStack.fromItemStack(added);
-                    if (!ChiselPatternDetails.addChiselPatterns(input, r.getItemsForChiseling(added), patterns, this.parallel)) {
-                        this.inv.setStackInSlot(0, ItemStack.EMPTY);
-                    }
-                }
-                this.getProxy().getNode().getGrid().postEvent(new MENetworkCraftingPatternChange(this, this.getProxy().getNode()));
-            }
+            case EXTRACT, INSERT, SET -> this.rebuildPatterns();
         }
     }
 
@@ -126,10 +100,35 @@ public class TileEntityAEChisel extends AENetworkInvTile implements IInterfaceHo
             for (var pattern : this.patterns) {
                 pattern.setParallel(this.parallel);
             }
-            var n = this.getProxy().getNode();
-            if (n == null) return;
-            n.getGrid().postEvent(new MENetworkCraftingPatternChange(this,n));
+            this.postPatternChange();
         }
+    }
+
+    private void rebuildPatterns() {
+        this.patterns.clear();
+
+        var stack = this.inv.getStackInSlot(0);
+        if (!stack.isEmpty()) {
+            var registry = CarvingUtils.getChiselRegistry();
+            if (registry != null) {
+                var input = AEItemStack.fromItemStack(stack);
+                if (!ChiselPatternDetails.addChiselPatterns(input, registry.getItemsForChiseling(stack), this.patterns, this.parallel)) {
+                    this.inv.setStackInSlot(0, ItemStack.EMPTY);
+                    return;
+                }
+            }
+        }
+
+        this.postPatternChange();
+    }
+
+    private void postPatternChange() {
+        var node = this.getProxy().getNode();
+        if (node == null) {
+            return;
+        }
+
+        node.getGrid().postEvent(new MENetworkCraftingPatternChange(this, node));
     }
 
     @Override
@@ -204,7 +203,7 @@ public class TileEntityAEChisel extends AENetworkInvTile implements IInterfaceHo
             if (input.isEmpty()) continue;
             if (inputD.isItemEqual(input)) {
                 var out = details.getCondensedOutputs()[0].copy().setStackSize(input.getCount());
-                cache.addStorage(out);
+                this.queueOutput(out);
                 return true;
             }
         }
@@ -259,7 +258,7 @@ public class TileEntityAEChisel extends AENetworkInvTile implements IInterfaceHo
 
     @Override
     public @NotNull TickingRequest getTickingRequest(@NotNull IGridNode node) {
-        return this.duality.getTickingRequest(node);
+        return adjustTickingRequestForCachedOutputs(this.duality.getTickingRequest(node), !this.cache.isEmpty());
     }
 
     @Override
@@ -285,5 +284,37 @@ public class TileEntityAEChisel extends AENetworkInvTile implements IInterfaceHo
             }
         }
         return TickRateModulation.URGENT;
+    }
+
+    static TickingRequest adjustTickingRequestForCachedOutputs(@NotNull TickingRequest request, boolean hasCachedOutputs) {
+        if (!hasCachedOutputs || !request.isSleeping) {
+            return request;
+        }
+        return new TickingRequest(request.minTickRate, request.maxTickRate, false, request.canBeAlerted);
+    }
+
+    private void queueOutput(@NotNull IAEItemStack output) {
+        boolean shouldWake = this.cache.isEmpty();
+        this.cache.addStorage(output);
+        if (shouldWake) {
+            this.wakeForCachedOutputs();
+        }
+    }
+
+    private void wakeForCachedOutputs() {
+        if (this.cache.isEmpty()) {
+            return;
+        }
+
+        var node = this.getProxy().getNode();
+        if (node == null) {
+            return;
+        }
+
+        try {
+            this.getProxy().getTick().wakeDevice(node);
+        } catch (GridAccessException ignored) {
+
+        }
     }
 }

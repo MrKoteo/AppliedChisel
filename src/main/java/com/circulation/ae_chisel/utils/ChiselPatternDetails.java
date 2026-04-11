@@ -22,13 +22,15 @@ public record ChiselPatternDetails(IAEItemStack[] inputs, IAEItemStack[] outputs
     public static boolean addChiselPatterns(@Nullable IAEItemStack input, @Nullable Collection<ItemStack> outputs, @NotNull Collection<ChiselPatternDetails> patterns, int parallel) {
         if (input == null) return false;
         if (outputs == null || outputs.isEmpty()) return false;
+        boolean addedPattern = false;
         for (var itemStack : outputs) {
             var out = AEItemStack.fromItemStack(itemStack);
-            if (out != null && !input.equals(itemStack)) {
+            if (out != null && !input.equals(out)) {
                 patterns.add(new ChiselPatternDetails(input.copy().setStackSize(parallel), out.setStackSize(parallel)));
+                addedPattern = true;
             }
         }
-        return true;
+        return addedPattern;
     }
 
     public void setParallel(int parallel) {
